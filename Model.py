@@ -252,7 +252,7 @@ class Diffusion:
         x = torch.randn([batch_size,3,image_size,image_size], device=device)
         for t in trange(T-1, -1, -1, desc='Sampling'):
             t_batch = torch.full([batch_size,], t, device=device, dtype=torch.long)
-            eps_pred = model(x, time_embedding[t])
+            eps_pred = model(x, time_embeddings[t_batch])
             coef1 = sqrt_recip_alphas[t]
             coef2 = betas[t] / sqrt_one_minus_alphas_cumprod[t]
             mean = coef1 * (x - coef2 * eps_pred)
