@@ -1,6 +1,8 @@
 import torch
 import math
 from torch import nn
+from tqdm import trange
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 """
 beta alpha dictionary
@@ -17,6 +19,8 @@ def coefficient_init(T:int, beta_src:float=0.0001, beta_cls:float=0.02):
     coefficient_dict["cumprod_alphas"] = cumprod_alphas
     coefficient_dict["sqrt_one_minus_cumprod_alphas"] = sqrt_one_minus_cumprod_alphas
     coefficient_dict["sqrt_cumprod_alphas"] = sqrt_cumprod_alphas
+    coefficient_dict["sqrt_recip_alphas"] = torch.sqrt(1.0 / alphas)
+    coefficient_dict["posterior_variance"] = betas[1:] * (1 - alphas[:-1]) / (1 - cumprod_alphas[1:])
 
 """
 func:get the time_embedding ranging from 0 to T
@@ -44,7 +48,7 @@ def embedding_utils(string:str, dim:int, device, num_classes:int=0, T:int=0):
 func:time_step_embedding with features
 """
 def time_embedding_util(x, time_embedding, target_dim:int, embedding_dim:int=512):
-    MLP = nn.Linear(in_features=embedding_dim, out_features=target_dim)
+    MLP = nn.Linear(in_features=embedding_dim, out_features=target_dim).to(device)
     time_vector = MLP(time_embedding)
     time_vector = time_vector.unsqueeze(2).unsqueeze(2)
     return x + time_vector
@@ -90,7 +94,7 @@ class MobileBlock(nn.Module):
         # depth_wise convolution
         self.Depth_wise_conv = nn.Sequential(
             nn.Conv2d(in_channels=self.expansion_channels, out_channels=self.expansion_channels,
-                      kernel_size=3, stride=1, padding=1),
+                      kernel_size=3, stride=1, padding=1, groups=self.expansion_channels),
             nn.GroupNorm(8,self.expansion_channels),
             nn.SiLU(inplace=True)
         )
@@ -219,7 +223,47 @@ class Diffusion:
                                                view([x_0.shape[0],1,1,1])).to(device)
         return x_0*batch_sqrt_cumprod_alphas+random_noise*batch_sqrt_one_minus_cumprod_alphas, random_noise
 
+    @torch.no_grad()
+    def sample(self,
+               model,
+               batch_size:int,
+               image_size:int,
+               device:torch.device,
+               time_embeddings:torch.Tensor,
+               betas:torch.Tensor,
+               alphas_cumprod:torch.Tensor,
+               sqrt_recip_alphas:torch.Tensor,
+               sqrt_one_minus_alphas_cumprod:torch.Tensor,
+               posterior_variance:torch.Tensor,
+               T:int):
+        """
+        无条件的 DDPM 采样主函数
+        :param model: 训练好的模型
+        :param batch_size: 批量大小
+        :param device: 设备选择
+        :param betas:
+        :param alphas_cumprod:
+        :param sqrt_recip_alphas:
+        :param sqrt_one_minus_alphas_cumprod:
+        :param posterior_variance: 后验条件指导去噪过程的随机加噪
+        :param T:
+        :return:
+        """
+        x = torch.randn([batch_size,3,image_size,image_size], device=device)
+        for t in trange(T-1, -1, -1, desc='Sampling'):
+            t_batch = torch.full([batch_size,], t, device=device, dtype=torch.long)
+            eps_pred = model(x, time_embedding[t])
+            coef1 = sqrt_recip_alphas[t]
+            coef2 = betas[t] / sqrt_one_minus_alphas_cumprod[t]
+            mean = coef1 * (x - coef2 * eps_pred)
 
+            if t > 0:
+                var = posterior_variance[t-1]
+                noise = torch.randn_like(x)
+                x = mean + torch.sqrt(var) * noise
+            else:
+                x = mean
+        return x
 
 if __name__ == "__main__":
     """
